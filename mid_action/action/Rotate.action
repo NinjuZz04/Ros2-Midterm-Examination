@@ -1,0 +1,8 @@
+# Goal 
+float64 angle # target rotation in radians (+ccw, -cw)
+---
+# Result
+bool success
+---
+# Feedback
+float64 remaining_angle
