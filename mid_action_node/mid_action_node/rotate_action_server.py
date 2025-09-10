@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 import math
 import time
 
@@ -18,17 +19,28 @@ def normalize_angle(a: float) -> float:
 
 
 class RotateActionServer(Node):
+    """
+    Action server 'rotate' that rotates the robot by a requested yaw angle (radians)
+    using a simple P-controller on /cmd_vel angular.z and /odom yaw feedback.
+
+    Behavior intentionally matches the original:
+    - Same parameters (kp, max_w, min_w, tolerance_deg, odom_topic)
+    - Same topics (/cmd_vel, /odom)
+    - Same success criteria (stable hits inside tolerance)
+    - Same loop timing and min-speed deadband logic
+    """
+
     def __init__(self) -> None:
         super().__init__('rotate_action_server')
 
-        # -------- Parameters --------
+        # -------- Parameters (unchanged defaults) --------
         self.declare_parameter('kp', 0.5)                # proportional gain
         self.declare_parameter('max_w', 1.2)             # max |angular z|
         self.declare_parameter('min_w', 0.15)            # min |angular z|
         self.declare_parameter('tolerance_deg', 5.0)     # stop window (deg)
         self.declare_parameter('odom_topic', '/odom')    # odom topic name
 
-        # Pre-fetch parameter values to avoid repeated lookups
+        # Cache parameter values (no behavior change)
         self._kp: float = float(self.get_parameter('kp').value)
         self._max_w: float = float(self.get_parameter('max_w').value)
         self._min_w: float = float(self.get_parameter('min_w').value)
@@ -37,6 +49,7 @@ class RotateActionServer(Node):
 
         # -------- Publishers / Subscribers --------
         self.cmd_pub = self.create_publisher(Twist, '/cmd_vel', 10)
+
         self._x: float = 0.0
         self._y: float = 0.0
         self._yaw: float = 0.0
@@ -46,7 +59,7 @@ class RotateActionServer(Node):
             Odometry, self._odom_topic, self._odom_cb, 25
         )
 
-        # -------- Action Server --------
+        # -------- Action Server (same name/type) --------
         self._server = ActionServer(
             self,
             Rotate,
@@ -56,9 +69,9 @@ class RotateActionServer(Node):
             cancel_callback=self.cancel_cb,
         )
 
-        self.get_logger().info('rotate_action_server ready')
+        self.get_logger().info('✅ rotate_action_server ready')
 
-    # ---------------- Callbacks ----------------
+    # ---------------- Internal Helpers ----------------
 
     def _odom_cb(self, msg: Odometry) -> None:
         """Cache x, y, yaw from /odom."""
@@ -66,32 +79,45 @@ class RotateActionServer(Node):
         self._y = msg.pose.pose.position.y
 
         q = msg.pose.pose.orientation
+        # yaw from quaternion
         siny_cosp = 2.0 * (q.w * q.z + q.x * q.y)
         cosy_cosp = 1.0 - 2.0 * (q.y * q.y + q.z * q.z)
         self._yaw = math.atan2(siny_cosp, cosy_cosp)
 
         self._have_odom = True
 
+    def _stop(self) -> None:
+        """Publish zero cmd to stop the robot (idempotent)."""
+        self.cmd_pub.publish(Twist())
+
+    # ---------------- Action Callbacks ----------------
+
     def goal_cb(self, goal_request: Rotate.Goal) -> GoalResponse:
-        self.get_logger().info(f'Goal received: angle={goal_request.angle:.3f} rad')
+        self.get_logger().info(f'🎯 Goal received: angle={goal_request.angle:.3f} rad')
         return GoalResponse.ACCEPT
 
     def cancel_cb(self, _goal_handle) -> CancelResponse:
-        self.get_logger().info('Cancel requested')
+        self.get_logger().info('⏹️ Cancel requested')
         return CancelResponse.ACCEPT
 
     def execute_cb(self, goal_handle) -> Rotate.Result:
         """Run a simple P-controller on yaw until target reached stably."""
-        # Wait for first odom
+        # Wait for first odom (same behavior)
         while rclpy.ok() and not self._have_odom:
             rclpy.spin_once(self, timeout_sec=0.1)
 
-        # Read goal and compute target yaw
+        if not rclpy.ok():
+            # Node shutting down
+            res = Rotate.Result()
+            res.success = False
+            return res
+
+        # Read goal and compute target yaw (same)
         target_delta: float = float(goal_handle.request.angle)   # radians
         start_yaw: float = self._yaw
         target_yaw: float = normalize_angle(start_yaw + target_delta)
 
-        # Control loop settings
+        # Control loop settings (same)
         fb = Rotate.Feedback()
         cmd = Twist()
         dt: float = 0.1
@@ -105,9 +131,10 @@ class RotateActionServer(Node):
                 goal_handle.canceled()
                 res = Rotate.Result()
                 res.success = False
-                self.get_logger().info('Goal canceled')
+                self.get_logger().info('🛑 Goal canceled')
                 return res
 
+            # Process odom and callbacks
             rclpy.spin_once(self, timeout_sec=0.0)
 
             # Error (remaining angle) and feedback
@@ -120,7 +147,7 @@ class RotateActionServer(Node):
                 f'(remain={math.degrees(remain):.1f}°)'
             )
 
-            # Stable-in-tolerance check
+            # Stable-in-tolerance check (same semantics)
             if abs(remain) <= self._tol:
                 stable_hits += 1
                 if stable_hits >= needed_hits:
@@ -138,7 +165,7 @@ class RotateActionServer(Node):
             cmd.angular.z = float(w)
             self.cmd_pub.publish(cmd)
 
-            # Fixed-rate loop using time.sleep (simple and good enough here)
+            # Fixed-rate loop (same)
             time.sleep(dt)
 
         # Success
@@ -146,12 +173,8 @@ class RotateActionServer(Node):
         goal_handle.succeed()
         res = Rotate.Result()
         res.success = True
-        self.get_logger().info('Goal reached successfully')
+        self.get_logger().info('✅ Goal reached successfully')
         return res
-
-    def _stop(self) -> None:
-        """Publish zero cmd to stop the robot."""
-        self.cmd_pub.publish(Twist())
 
 
 def main(args=None) -> None:
